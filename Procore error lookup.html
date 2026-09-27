@@ -1,0 +1,310 @@
+<!DOCTYPE html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>NetSuite ↔ Procore Error Database</title>
+<style>
+:root{--bg:#f6f7f9;--card:#fff;--tx:#1a1d23;--mut:#5f6773;--bd:#dde1e7;--ac:#e8590c;--code:#eef0f3;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#14161a;--card:#1d2026;--tx:#e8eaed;--mut:#9aa3af;--bd:#2f343c;--ac:#ff8a4c;--code:#262a31}}
+:root[data-theme="dark"]{--bg:#14161a;--card:#1d2026;--tx:#e8eaed;--mut:#9aa3af;--bd:#2f343c;--ac:#ff8a4c;--code:#262a31}
+html{scroll-padding-top:env(safe-area-inset-top,0px)}*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--tx);font:15px/1.5 -apple-system,system-ui,"Segoe UI",Roboto,sans-serif}
+main{max-width:780px;margin:0 auto;padding:14px}
+h1{font-size:19px;margin:0}.sub{color:var(--mut);font-size:13px;margin:2px 0 12px}
+.bar{position:sticky;top:env(safe-area-inset-top,0px);background:var(--bg);padding:6px 0;z-index:2}
+textarea{width:100%;min-height:52px;max-height:160px;background:var(--card);color:var(--tx);border:1px solid var(--bd);border-radius:10px;padding:10px;font:14px ui-monospace,Menlo,Consolas,monospace;resize:vertical}
+.chips{display:flex;gap:6px;overflow-x:auto;padding:8px 0 2px}
+.chip{flex:none;border:1px solid var(--bd);background:var(--card);color:var(--tx);border-radius:99px;padding:6px 12px;font-size:13px;cursor:pointer}
+.chip.on{background:var(--ac);border-color:var(--ac);color:#fff}
+.cnt{font-size:12px;color:var(--mut);margin:6px 2px}
+details{background:var(--card);border:1px solid var(--bd);border-radius:10px;margin-bottom:8px}
+summary{padding:11px 12px;cursor:pointer;font-weight:600;list-style:none}
+summary::-webkit-details-marker{display:none}
+.tag{display:inline-block;font-size:10px;font-weight:700;padding:1px 7px;border-radius:99px;background:var(--ac);color:#fff;margin-right:6px;vertical-align:1px}
+.bd{padding:0 12px 12px;font-size:14px}
+.bd b{display:block;font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:var(--mut);margin-top:8px}
+.k{font:12px ui-monospace,Menlo,monospace;background:var(--code);border-radius:6px;padding:2px 6px;color:var(--mut);overflow-wrap:anywhere}
+ol.steps{margin:4px 0 0;padding-left:20px}
+ol.steps li{margin:3px 0}
+.cp{margin-top:10px;background:none;border:1px solid var(--bd);color:var(--mut);border-radius:8px;padding:6px 12px;font-size:13px}
+.empty{text-align:center;color:var(--mut);padding:30px 10px}
+</style></head><body><main>
+<h1>🔧 NetSuite ↔ Procore Error Database</h1>
+<div class="sub">Works fully offline. Search a code or paste a whole error/log — best matches rank first.</div>
+<div class="bar"><textarea id="q" placeholder="Search or paste error text (e.g. INVALID_KEY_OR_REF, 422, invalid_grant)…"></textarea>
+<div class="chips" id="chips"></div></div>
+<div class="cnt" id="cnt"></div><div id="list"></div>
+</main>
+<script>
+// [system, title, match keys (|), cause, steps (array)]
+const D=[
+['NS','INVALID_LOGIN_ATTEMPT (TBA/OAuth1.0)','invalid_login_attempt|invalid login attempt|invalid_signature|signature',
+'Wrong token/consumer key or secret, wrong realm, clock drift, or the token/integration is disabled.',
+['Confirm the realm is the account ID exactly as NetSuite shows it (e.g. 1234567_SB1).','Recheck all four TBA values: consumer key, consumer secret, token ID, token secret.','Sync the sending server clock (TBA is time-sensitive).','In NetSuite go to Setup > Integration > Manage Integrations and confirm the record is enabled.','Confirm the token role has "Log in using Access Tokens" permission and the token itself is active.']],
+['NS','OAuth 2.0 invalid_grant / invalid_client','invalid_grant|invalid_client|invalid_request|oauth2|jwt',
+'Expired/revoked refresh token, wrong client credentials, bad certificate/key ID, or wrong subdomain.',
+['Check whether the refresh token expired or was already used (rotate on every refresh).','Verify client ID, client secret/cert ID against the NetSuite integration record.','Confirm you are hitting the correct account-specific domain.','Re-run the OAuth authorization flow to mint a fresh token pair.','Store the new refresh token atomically so a retry never reuses a stale one.']],
+['NS','CONCURRENCY_LIMIT_EXCEEDED','concurrency_limit_exceeded|concurrency',
+'More parallel requests than your SuiteCloud license tier allows.',
+['Count how many concurrent calls your integration and any others are making.','Add a semaphore/queue capping parallel requests to your account limit.','Add exponential backoff with jitter on this specific error.','If load is legitimate, review SuiteCloud Plus licensing with your NetSuite admin.']],
+['NS','SSS_REQUEST_LIMIT_EXCEEDED','sss_request_limit_exceeded|request limit',
+'Too many requests within the rolling window.',
+['Log the request rate over the last minute.','Introduce throttling (token bucket) client-side.','Batch multiple records per call where the endpoint supports it.','Retry failed calls with exponential backoff.']],
+['NS','SSS_USAGE_LIMIT_EXCEEDED','sss_usage_limit_exceeded|usage limit|governance',
+'Script exhausted its governance unit allowance.',
+['Open the script execution log to see which operation used the most units.','Replace record.load loops with saved search or SuiteQL where possible.','Reduce the number of records processed per invocation.','Convert the script to Map/Reduce or Scheduled type for large batches.']],
+['NS','SSS_TIME_LIMIT_EXCEEDED','sss_time_limit_exceeded|time limit',
+'Script exceeded its max execution time.',
+['Check the execution log for the slow step.','Reduce batch size per run.','Move heavy logic to Map/Reduce which naturally re-queues.','Add early-exit checkpoints so partial progress is not lost.']],
+['NS','INVALID_KEY_OR_REF','invalid_key_or_ref|invalid key or ref|invalid reference',
+'A referenced internal ID (vendor, subsidiary, account, class, dept, location, item, term) does not exist, is inactive, or is from a different account.',
+['Identify which field the error references from the message text.','Look up that internal ID directly in NetSuite to confirm it exists.','Check the record is Active and shared with the relevant subsidiary.','If this followed a sandbox refresh, internal IDs may differ — re-map them.','Re-send with the corrected ID.']],
+['NS','INSUFFICIENT_PERMISSION','insufficient_permission|permission violation|do not have permission|permission',
+'The integration role is missing a permission or level for this action.',
+['Read the error to identify the exact permission/record type named.','Go to Setup > Users/Roles > Manage Roles and open the integration role.','Add the missing permission at the required level (View/Edit/Full).','Save and retry — role changes apply immediately for token-based auth.']],
+['NS','Required field missing','required_field|please enter value|missing required|mandatory',
+'A mandatory field for that record/form is absent from the payload.',
+['Read the field name from the error.','Open Customize Form for that record type and check which fields are flagged Mandatory.','Add the field to your mapping/payload, or set a default value.','Re-test with a minimal payload to confirm the fix.']],
+['NS','RCRD_HAS_BEEN_CHANGED','rcrd_has_been_changed|record has been changed',
+'Record was modified after your integration read it.',
+['Re-fetch the current version of the record.','Reapply only the fields your integration needs to change.','Retry the update.','If this repeats often, add a short lock/lease so two processes don’t edit the same record at once.']],
+['NS','DUP_RCRD / duplicate','dup_rcrd|duplicate|already exists|dup_vendor',
+'A record with the same name, tax ID, external ID, or number already exists.',
+['Search for the existing record by tax ID/name/external ID before creating.','If found, update instead of create.','If not found, check for a NetSuite duplicate-detection rule blocking creation.','Adopt externalId-based upsert so retries can’t double-create.']],
+['NS','INVALID_FLD_VALUE','invalid_fld_value|invalid field value|invalid value',
+'Wrong data type, an unlisted select-list value, or a bad date/number format.',
+['Identify the offending field from the error text.','Confirm the value exists in that field’s list (for select fields).','Confirm numbers are sent as numbers and dates match the account’s date format.','Correct and resend.']],
+['NS','INVALID_RCRD_TRANSFRM','invalid_rcrd_transfrm|transform',
+'The record transform requested isn’t valid in the source record’s current state (e.g. PO → Bill before approval).',
+['Check the source record’s status/approval state.','Confirm NetSuite allows this exact transform in your account configuration.','Wait for or trigger the required status change first.','Retry the transform.']],
+['NS','Subsidiary / vendor-subsidiary mismatch','subsidiary|not associated|invalid_subsidiary',
+'The vendor or account is not shared with the transaction’s subsidiary (OneWorld).',
+['Open the vendor record and check the Subsidiaries subtab.','Add the missing subsidiary to the vendor.','Confirm the GL account is also available to that subsidiary.','Retry the transaction.']],
+['NS','Closed posting period','posting period|period is closed|closed period|accounting period',
+'Transaction date falls in a locked or closed accounting period.',
+['Check the transaction date against Setup > Accounting > Manage Accounting Periods.','Decide policy: reopen the period, or shift the date to the next open period.','If reopening, get accounting sign-off first (this affects reported financials).','Resend the transaction.']],
+['NS','Journal entry not balanced','debits|credits|does not balance|out of balance|unbalanced',
+'Debit and credit totals differ, often due to per-line rounding.',
+['Sum all debit lines and all credit lines separately.','Recalculate line amounts using integer cents, not floats.','Push any remaining rounding difference onto a single designated line.','Resend and confirm totals match exactly.']],
+['NS','Currency / exchange rate error','exchange rate|currency|invalid_currency',
+'Currency isn’t enabled on the vendor/subsidiary, or no rate exists for that date.',
+['Check the vendor’s allowed currencies.','Check Setup > Accounting > Currency Exchange Rates for that date.','Add the missing currency or rate.','Retry the transaction.']],
+['NS','RCRD_DSNT_EXIST / not found','rcrd_dsnt_exist|record not found|does not exist|was not found',
+'ID doesn’t exist, was deleted, or you’re pointed at the wrong account/sandbox.',
+['Confirm which environment (production vs sandbox) the call actually hit.','Confirm you used internal ID, not external ID, where the API expects internal ID (or vice versa).','Search for the record manually to see if it was deleted.','Update the mapping and retry.']],
+['NS','Custom field not found','custbody|custcol|custentity|custrecord|field .* not found|unknown field',
+'Wrong script ID, field not applied to that record’s form, or it only exists in sandbox.',
+['Compare the script ID in your payload to Customization > Lists/Fields.','Check the field’s "Applies To" record types and forms.','If missing in production, deploy the customization via bundle/SDF.','Retry after confirming the field is visible on that form.']],
+['NS','SSS_INVALID_SCRIPT_ID / deployment issue','sss_invalid_script_id|invalid script|deployment|restlet|suitelet',
+'Wrong script/deployment ID, deployment not released, or role not in its audience.',
+['Confirm script and deployment internal IDs match your call’s URL parameters.','Check the deployment status is Released, not Testing.','Add the integration role to the deployment’s Audience.','Retry the call.']],
+['NS','REST Web Services not enabled','web services|rest web services|feature|ws_request_blocked',
+'The feature is off account-wide, or the role lacks the permission.',
+['Go to Setup > Company > Enable Features > SuiteCloud and enable REST Web Services/SuiteTalk.','Add "REST Web Services" permission to the integration role.','Save and retry the call.']],
+['NS','415 Unsupported Media Type','415|content-type|unsupported media|prefer: transient',
+'Missing or incorrect Content-Type/Prefer headers.',
+['Set Content-Type: application/json on every request with a body.','Add Prefer: transient where required by record/RESTlet calls.','Resend the request.']],
+['NS','SuiteQL / search syntax error','suiteql|invalid search|syntax|search_error',
+'Bad column/table name or unsupported join in the query.',
+['Test the exact query in the SuiteQL/Query tool inside NetSuite first.','Fix column/table names to match the schema.','Add the Prefer: transient header if using the REST query endpoint.','Resend from the integration.']],
+['NS','Wrong account domain / ENOTFOUND','enotfound|getaddrinfo|account domain|suitetalk.api',
+'Account ID formatted wrong or hitting a non-account-specific domain.',
+['Format the URL host as lowercase-hyphenated (1234567-sb1.suitetalk.api.netsuite.com).','Use the underscore/uppercase form only inside the OAuth realm value, not the URL.','Retry the DNS lookup/request.']],
+['NS','Sandbox refresh broke integration','sandbox|refresh|_sb',
+'A sandbox refresh reset tokens/integrations and possibly internal IDs.',
+['Recreate the integration record and access tokens in the refreshed sandbox.','Update the account ID/realm your integration points at.','Re-map any internal IDs that changed.','Run a small test transaction before resuming full sync.']],
+['NS','Vendor bill stuck in approval routing','approval|approvalstatus|routing',
+'An approval workflow intercepts records created by the integration.',
+['Check Setup > Accounting Preferences for Bill Approval settings.','Decide whether the integration role should be exempt from approval routing.','Set the correct approvalstatus value on creation if your process allows it.','Confirm with accounting before changing approval policy.']],
+['NS','Field length exceeded','too long|maximum length|exceeds|truncat',
+'A text field (name, memo, custom text) exceeds NetSuite’s limit.',
+['Identify the field and its documented max length.','Truncate on the sending side before submission (e.g. ~83 chars for company name, ~4000 for memo).','Consider storing the full text in Procore only and a short summary in NetSuite.','Resend.']],
+['NS','Item vs expense line mismatch','item sublist|expense sublist|invalid item|line type',
+'Fields meant for expense lines were sent on an item sublist or vice versa.',
+['Identify which sublist the transaction actually needs (item vs expense).','Rebuild the line payload using only that sublist’s required fields.','Remove fields belonging to the other sublist type.','Resend.']],
+['NS','Rate limited by IP/allow-list','ip address|not allowed|blocked|allow.list|whitelist',
+'The calling server’s IP isn’t on NetSuite’s or your firewall’s allow-list.',
+['Get the exact outbound IP of the calling server.','Add it to any IP-based restriction in NetSuite (if configured) and your own firewall/WAF.','Retry the call.']],
+['NS','Two-factor / role login block for token','two factor|2fa|token.based','2FA doesn’t apply to token-based auth, so this usually signals the wrong auth method was attempted.',
+['Confirm the integration truly uses Token-Based Authentication or OAuth 2.0, not username/password login.','Switch the connection method if it was mistakenly using interactive login.','Retry with the correct auth flow.']],
+['PC','401 invalid_token / expired token','401|invalid_token|token expired|unauthorized|access token',
+'Access token expired or was revoked.',
+['Call the token refresh endpoint using the stored refresh token.','Save the newly returned access and refresh tokens immediately.','Retry the original request with the new access token.','If refresh also fails, re-run full OAuth authorization.']],
+['PC','invalid_grant on refresh','invalid_grant|refresh token|already used',
+'Refresh token already used (they rotate), wrong client, or app access revoked.',
+['Check your token store for a race condition writing two refreshes at once.','Serialize refresh calls so only one happens at a time per connection.','If the app’s access was revoked in Procore, re-authorize from scratch.']],
+['PC','invalid_redirect_uri / client error','redirect_uri|invalid_client|client_id|client_secret',
+'Redirect URI not registered, or wrong client ID/secret for the environment.',
+['Compare the redirect URI in your app config to the one registered in the Procore developer portal exactly.','Confirm you are using sandbox credentials against sandbox.procore.com and production credentials against api.procore.com.','Fix the mismatch and retry authorization.']],
+['PC','403 forbidden','403|forbidden|not authorized|permission denied',
+'User lacks tool permission on the project, or the app isn’t installed on the company.',
+['Check the connected user’s permission template for the relevant tool (Commitments, Budget, Directory, etc.).','Confirm the app is installed and enabled on that specific Procore company.','Grant Standard or Admin access as needed.','Retry the call.']],
+['PC','Procore-Company-Id missing/incorrect','procore-company-id|company_id|company id',
+'Header absent or pointing at the wrong company.',
+['Look up the correct company ID for the target account.','Add header Procore-Company-Id with that value on every company-scoped call.','Retry.']],
+['PC','404 not found','404|not found|could not be found|couldn.t find',
+'Wrong ID (often a NetSuite ID sent by mistake), deleted object, tool disabled, or no visibility.',
+['Confirm the ID used is a genuine Procore ID, not a NetSuite internal ID.','Check the object still exists in the Procore UI.','Confirm the relevant tool is enabled on that project.','Correct the ID/mapping and retry.']],
+['PC','422 validation (generic)','422|unprocessable|is invalid|can.t be blank|is not included',
+'One or more fields failed Procore’s validation.',
+['Read the errors object in the response body field by field.','Fix each named field: required, enum, or format issue.','Re-validate the payload structure against the endpoint’s docs.','Resend.']],
+['PC','Cost code not on project budget','wbs|cost code|cost_code|line item|budget',
+'The cost code exists in the company but hasn’t been added to this project’s budget.',
+['Sync/create the cost code at the company level first.','Add the cost code line to the project budget.','Retry the commitment/direct cost creation referencing that code.']],
+['PC','Vendor not in project directory','vendor|directory|not a member|company not found',
+'The vendor exists company-wide but hasn’t been added to this specific project.',
+['Add the vendor to the project’s Directory tool.','Confirm the vendor’s company-level record is active.','Retry the commitment creation.']],
+['PC','Commitment number already taken','has already been taken|number|duplicate',
+'The commitment/PO number was reused on this project.',
+['Search existing commitments on the project for that number.','Generate a guaranteed-unique number (e.g. source system ID plus suffix).','Resend with the new number.']],
+['PC','Invalid status transition','status|approved|draft|cannot be changed|locked|read.only',
+'Attempted to edit or move status backward on an approved/locked object.',
+['Check the object’s current status in Procore.','If it’s approved, create a change order instead of editing directly.','If it’s locked, confirm who can unlock it and the correct workflow.','Retry via the correct path.']],
+['PC','SOV / line total mismatch','sov|schedule of values|must equal|amount|total',
+'Line item amounts don’t sum to the contract/commitment total.',
+['Recompute the sum of all line amounts in integer cents.','Compare against the target contract total.','Adjust the largest or last line by the rounding difference.','Resend.']],
+['PC','Change order errors','change order|pcco|cco|commitment change',
+'Parent commitment not approved, Change Orders tool disabled, or wrong CO type.',
+['Confirm the parent commitment is fully approved.','Confirm Change Orders is enabled on the project and configured for the tier you’re using (Prime/Commitment).','Match the change order type to what the project expects.','Resend.']],
+['PC','429 rate limit','429|rate limit|too many requests|x-ratelimit',
+'Hourly per-app request cap exceeded.',
+['Read the X-RateLimit-Remaining and Retry-After response headers.','Pause calls until the reset time.','Cache repeat lookups and batch where the API allows.','Switch polling to webhooks to cut call volume.']],
+['PC','Wrong base URL (sandbox vs prod)','sandbox.procore|api.procore|environment|base url',
+'Sandbox token used against production or the reverse.',
+['Identify which credentials you actually hold (sandbox or production).','Match the base URL exactly: sandbox.procore.com or api.procore.com.','Retry with the correct pairing.']],
+['PC','Pagination gaps (missing records)','per_page|page|pagination|link header|missing records',
+'Only the first page was read; default page size is small.',
+['Check the response Link header for a "next" relation.','Loop requests following that header, or increment page until the response is empty.','Set per_page to the endpoint’s max (commonly 100).','Re-run the full sync to backfill missed records.']],
+['PC','Webhook not firing / failing','webhook|hook|delivery|trigger',
+'Endpoint returns non-2xx, times out, or the trigger/resource filter is wrong.',
+['Check the webhook delivery log in Procore for status codes returned.','Make your endpoint respond 200 immediately and process the payload asynchronously.','Verify the trigger event and resource type match what you expect.','Re-create the hook if it was disabled after repeated failures.']],
+['PC','Unpermitted / unknown parameter','unpermitted|unknown parameter|parameter|unrecognized',
+'Payload includes a field the endpoint doesn’t accept, or wrong nesting.',
+['Diff your payload against the endpoint’s documented schema.','Remove unexpected top-level or nested fields.','Confirm the payload is wrapped in the expected root key (e.g. {"commitment": {...}}).','Resend.']],
+['PC','Project inactive or wrong stage','inactive|project stage|archived|closed project','Project is archived or in a stage blocking writes.',
+['Check the project’s active status and stage in Procore.','Reactivate it if the write is legitimate.','Otherwise exclude archived/closed projects from your sync filter.']],
+['PC','Direct cost / tool disabled','direct cost|tool|not enabled|disabled',
+'A required tool (Commitments, Direct Costs, Budget, Change Orders) isn’t enabled on the project.',
+['Open Project Tools/Admin settings.','Enable the specific tool the integration needs.','Confirm the connected user has access to that tool.','Retry.']],
+['PC','500 / 5xx server error','500|502|503|504|internal server error|bad gateway',
+'Procore-side issue or a malformed request tripping a server bug.',
+['Capture the request ID and full payload for reference.','Retry with exponential backoff (a few times).','If it persists on the same payload, simplify the request to isolate the trigger.','Contact Procore support with the request ID if it keeps failing.']],
+['PC','Scope missing for endpoint','scope|insufficient_scope|oauth scope',
+'The OAuth app wasn’t granted the scope this endpoint needs.',
+['Check which scopes your app requested at authorization time.','Add the missing scope in the developer app configuration.','Re-run authorization so the user grants the new scope.']],
+['PC','Custom field ID changed','custom_field|configurable field set|cf_',
+'Configurable field set IDs differ per company/project and can change.',
+['Fetch the current configurable field set for that company/project via the API.','Update your mapping with the current field IDs.','Resend using the refreshed IDs.']],
+['LT','Missing ID mapping','mapping|unmapped|no match|not mapped|lookup',
+'Vendor, project, cost code, or account has no partner record in the map table.',
+['Run master-data sync in order: vendors/companies, then projects, then cost codes/accounts.','Confirm each master record synced successfully before running transactions.','Backfill the mapping table for anything missed.','Re-run the failed transaction.']],
+['LT','Sync loop / ping-pong updates','loop|ping.pong|repeated|updated again|echo',
+'Each system’s update triggers a write back to the other, looping.',
+['Tag or timestamp changes made by the integration user.','Have the sync ignore incoming changes it recognizes as its own echo.','Compare a hash of synced fields before writing to skip no-op updates.','Add a short cool-down window per record after a sync write.']],
+['LT','Duplicates created','duplicate records|created twice|double',
+'A retry after a timeout re-created the record because there was no idempotency key.',
+['Add an idempotency/external ID key to every create call.','On retry, look up by that key before creating.','Merge or archive existing duplicates from before the fix.']],
+['LT','Date off by one day','timezone|off by one|date shifted|utc',
+'A date-only value passed through a UTC/timezone conversion and shifted.',
+['Find where the date is parsed into a datetime object.','Send and store date-only fields as plain YYYY-MM-DD, no time or zone.','If a timestamp is unavoidable, normalize explicitly to the company’s timezone.','Re-test across a date near midnight to confirm the fix.']],
+['LT','Penny rounding differences','rounding|cent|penny|difference|variance',
+'Line-level rounding differs between systems (float math or per-line tax/retainage).',
+['Switch internal math to integer cents rather than floating point.','Define one rounding rule (e.g. round half up) used everywhere.','Push any residual difference onto a designated last line.','Reconcile a sample transaction end to end.']],
+['LT','Retainage mismatch','retainage|retention|holdback',
+'Retainage modeled as a percent in one system and a fixed amount in the other.',
+['Decide a single source of truth for the retainage rate.','Convert consistently (percent to amount) at the point of sync.','Align on timing — released at billing vs at payment.','Re-test a sample invoice with retainage end to end.']],
+['LT','Batch partial failure','partial|batch|some records|bulk',
+'One bad record fails silently inside a larger batch call.',
+['Log a per-record result, not just a batch-level status.','Isolate the failing record’s payload from the log.','Fix and retry only that record.','Consider switching to one-call-per-record for critical transaction types.']],
+['LT','Stuck queue / job never finishes','queue|stuck|pending|processing|hung',
+'A worker crashed mid-job, a lock wasn’t released, or a poison message loops.',
+['Check the queue/job dashboard for stuck items and their age.','Inspect for a held lock or lease that never expired.','Move repeatedly failing items to a dead-letter queue.','Restart the worker and confirm the queue drains.']],
+['LT','Payload type / JSON error','json|unexpected token|parse|type mismatch|cannot convert|null',
+'Malformed JSON, wrong type (string vs number), or an unexpected null.',
+['Log the exact outgoing payload for the failing record.','Validate it against a schema before sending.','Fix the type or null-handling at the source field.','Resend and confirm it validates.']],
+['LT','Special characters / encoding','encoding|utf|special character|unicode|invalid character|&amp;',
+'Ampersands, accented characters, emoji, or control characters break JSON/XML or validation.',
+['Identify the offending character from the raw payload.','Properly encode/escape it for the target format (JSON/XML).','Strip non-printable control characters before sending.','Resend and verify rendering on the receiving side.']],
+['LT','Credentials swapped between environments','wrong environment|production|sandbox|swapped|test data',
+'Sandbox credentials pointed at production, or vice versa.',
+['Label every connection clearly by environment.','Verify base URL, account ID, and company ID together as a set, not individually.','Correct whichever one doesn’t match its pair.','Run one test record through before resuming full sync.']],
+['LT','Inactive record referenced','inactive|disabled|deactivated|archived',
+'The target-side vendor, cost code, or project is inactive.',
+['Check active status on the referenced record in the target system.','Reactivate it if that’s appropriate, or remap the transaction to an active equivalent.','Add an inactive-record check to pre-flight validation going forward.']],
+['LT','Deleted record orphaned in map','deleted|orphan|removed|no longer',
+'The mapped record was deleted in one system, orphaning the map row.',
+['Catch the resulting 404/not-found as a sign of an orphaned mapping.','Decide whether to recreate, relink, or archive the transaction.','Update or remove the stale map row.']],
+['LT','Field mapping changed without version bump','schema change|field renamed|mapping broke|api version',
+'One system renamed or restructured a field the mapping still points at.',
+['Diff the current API schema against your stored mapping.','Update the mapping to the new field name/structure.','Add a changelog check so future schema updates get caught earlier.']],
+['LT','Timezone mismatch on scheduled sync','cron|schedule|midnight|ran twice|missed run',
+'The sync scheduler and one of the source systems use different timezones.',
+['Confirm what timezone the scheduler runs in versus the source system’s reporting timezone.','Align the schedule to avoid boundary-crossing runs (e.g. avoid exact midnight).','Add a run-once guard so overlapping triggers can’t double-fire.']],
+['LT','INF002 Groovy "For input string: \\"\\"" (empty numeric parse)','for input string|groovy2|groovy script|numberformatexception|inf002',
+'A Groovy script step in the NetSuite→Procore vendor/customer route tries to convert a blank field to a number (e.g. Integer.parseInt("") or .toInteger()), which throws because NetSuite sent an empty string instead of null or a real value.',
+['Open the failing execution and find the exact Groovy script step in the process (INF002 / VendorAndCustomer).','Identify which field it converts to a number — commonly phone extension, zip/postal code, or a custom numeric field.','In NetSuite, open the vendor/customer record for this run and confirm that field is blank (empty string) rather than genuinely null.','Update the Groovy script to guard the conversion, e.g. only parse if the trimmed string is non-empty, otherwise default to null or 0.','Reprocess the failed document once the script is fixed, and spot-check a few other vendors with blank fields to confirm they no longer fail.']],
+['LT','INF003 404 on Procore requisitions endpoint (halts batch)','requisitions|halt|terminating|some documents reached an exception|response_code": "404',
+'The route called the Procore requisitions detail endpoint with an ID/project pair that returned 404 — usually because the ID used is not actually a requisition ID for that project, the requisition was deleted, or the webhook fired before Procore fully committed the record (eventual consistency). Because "halt on exception" is enabled, this one failure stopped the entire batch of documents.',
+['Confirm whether the ID in the failing URL is genuinely a requisition ID, or whether the route mistakenly reused a Draw Request ID in a requisition call.','Check that the project_id in the URL matches the project the requisition actually belongs to.','Open Procore and confirm the requisition still exists and was not deleted after the trigger fired.','If this follows immediately after a create/update webhook, add a short retry/delay before calling the detail endpoint to allow for propagation.','Review whether this route should halt the whole batch on a single 404, or skip just the affected document and continue — halting means every other document in that run was also blocked.','Once the root ID/timing issue is fixed, manually resubmit the halted batch so the other documents still get processed.']],
+['HTTP','400 Bad Request','400|bad request|malformed',
+'Invalid syntax, missing parameter, or malformed query/body.',
+['Validate the URL, headers, and body against the API docs.','Check for typos in parameter names.','Read the response body for a specific message.','Correct and resend.']],
+['HTTP','409 Conflict','409|conflict',
+'Version conflict, state conflict, or a duplicate.',
+['Re-fetch the current state of the resource.','Reapply your intended change on top of the latest version.','Resolve or skip if it’s a true duplicate.','Retry the request.']],
+['HTTP','ETIMEDOUT / ECONNRESET','etimedout|econnreset|timeout|timed out|socket hang',
+'Network drop, gateway timeout, or an oversized payload.',
+['Retry with exponential backoff.','Reduce payload/batch size and test again.','Check firewall/IP allow-list rules on both ends.','Set explicit, sane timeout values in your HTTP client.']],
+['HTTP','SSL / certificate error','ssl|certificate|cert|tls|handshake|self.signed',
+'Expired/untrusted certificate, TLS version mismatch, or proxy inspection interfering.',
+['Update the local CA bundle.','Confirm TLS 1.2 or higher is enabled on the client.','Exclude the API host from any corporate SSL-inspection proxy.','Retry the connection.']],
+['HTTP','CORS blocked (browser)','cors|access-control|preflight|blocked by',
+'A browser is calling an API directly and the origin isn’t allowed.',
+['Confirm the call is coming from a browser context.','Move the call to a backend service or proxy instead.','Never expose API secrets client-side.','Retry from the backend.']],
+['HTTP','DNS resolution failure','dns|name not resolved|nxdomain|could not resolve host',
+'Hostname typo, propagation delay, or local DNS/proxy issue.',
+['Double-check the hostname for typos.','Try resolving it from a different network to isolate local DNS issues.','Check any custom /etc/hosts or proxy override.','Retry once resolved.']],
+['HTTP','Payload too large','413|payload too large|request entity',
+'Body exceeds the endpoint’s size limit.',
+['Check the documented max payload size for that endpoint.','Split the batch into smaller chunks.','Resend each chunk separately.']],
+['GEN','Integration works locally but not in production','works locally|only in production|environment specific',
+'Environment-specific config difference: secrets, base URLs, IP allow-lists, or clock sync.',
+['Diff every environment variable between local/staging and production.','Confirm production secrets/URLs are the production set, not copied dev values.','Check production server’s outbound IP is allow-listed if applicable.','Confirm system clocks are in sync (matters for signed/token auth).']],
+['GEN','Intermittent failures with no clear pattern','intermittent|random|sometimes works|flaky',
+'Often rate limiting, race conditions, or a transient network blip.',
+['Log every failure with full timestamp, payload, and response.','Look for clustering around specific times, volumes, or record types.','Add retry with backoff as a baseline mitigation.','If it correlates with volume, treat it as a rate-limit issue.']]
+];
+const SYS={NS:'NetSuite',PC:'Procore',LT:'Lintune / Mapping',HTTP:'HTTP / Network',GEN:'General'};
+let sys='ALL';
+const $=id=>document.getElementById(id);
+$('chips').innerHTML=[['ALL','All']].concat(Object.entries(SYS)).map(([k,v])=>`<button class="chip${k==='ALL'?' on':''}" data-k="${k}">${v}</button>`).join('');
+$('chips').onclick=e=>{const k=e.target.dataset.k;if(!k)return;sys=k;[...$('chips').children].forEach(c=>c.classList.toggle('on',c.dataset.k===k));render()};
+$('q').oninput=render;
+function esc(s){const d=document.createElement('div');d.textContent=s;return d.innerHTML}
+function render(){
+  const q=$('q').value.toLowerCase().trim();
+  const toks=[...new Set(q.split(/[^a-z0-9_.\-]+/).filter(t=>t.length>2))].slice(0,60);
+  let rows=D.map((r,i)=>{
+    if(sys!=='ALL'&&r[0]!==sys)return null;
+    let sc=0;
+    if(q){
+      r[2].split('|').forEach(k=>{if(k&&q.includes(k))sc+=10});
+      const hay=(r[1]+' '+r[3]+' '+r[4].join(' ')).toLowerCase();
+      toks.forEach(t=>{if(r[2].includes(t))sc+=3;else if(hay.includes(t))sc+=1});
+      if(!sc)return null;
+    }
+    return {r,sc,i};
+  }).filter(Boolean);
+  if(q)rows.sort((a,b)=>b.sc-a.sc);
+  $('cnt').textContent=rows.length+' of '+D.length+' entries'+(q?' (best match first)':'');
+  $('list').innerHTML=rows.length?rows.map((x,n)=>{const r=x.r;
+    return `<details${q&&n===0?' open':''}><summary><span class="tag">${r[0]}</span>${esc(r[1])}</summary><div class="bd">
+    <b>Cause</b>${esc(r[3])}<b>Step-by-step fix</b><ol class="steps">${r[4].map(s=>`<li>${esc(s)}</li>`).join('')}</ol>
+    <b>Matches</b><span class="k">${esc(r[2].split('|').join(' · '))}</span><br>
+    <button class="cp" data-i="${x.i}">Copy</button></div></details>`}).join(''):'<div class="empty">No match. Try a shorter term, the HTTP status, or the error code only.</div>';
+}
+$('list').onclick=async e=>{const i=e.target.dataset.i;if(i===undefined)return;const r=D[i];
+  const t=`[${SYS[r[0]]}] ${r[1]}\nCause: ${r[3]}\nFix:\n`+r[4].map((s,n)=>`${n+1}. ${s}`).join('\n');
+  try{await navigator.clipboard.writeText(t);e.target.textContent='Copied ✓'}catch(_){e.target.textContent='Copy blocked'}};
+render();
+</script></body></html>
