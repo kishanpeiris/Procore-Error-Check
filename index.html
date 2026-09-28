@@ -26,7 +26,9 @@ summary::-webkit-details-marker{display:none}
 .k{font:12px ui-monospace,Menlo,monospace;background:var(--code);border-radius:6px;padding:2px 6px;color:var(--mut);overflow-wrap:anywhere}
 ol.steps{margin:4px 0 0;padding-left:20px}
 ol.steps li{margin:3px 0}
-.cp{margin-top:10px;background:none;border:1px solid var(--bd);color:var(--mut);border-radius:8px;padding:6px 12px;font-size:13px}
+.cp{margin-top:10px;margin-right:6px;background:none;border:1px solid var(--bd);color:var(--mut);border-radius:8px;padding:6px 12px;font-size:13px}
+.cp.vendor{border-color:#0a7cff;color:#0a7cff}
+.cp.internal{border-color:var(--ac);color:var(--ac)}
 .empty{text-align:center;color:var(--mut);padding:30px 10px}
 </style></head><body><main>
 <h1>🔧 NetSuite ↔ Procore Error Database</h1>
@@ -274,6 +276,11 @@ const D=[
 'Often rate limiting, race conditions, or a transient network blip.',
 ['Log every failure with full timestamp, payload, and response.','Look for clustering around specific times, volumes, or record types.','Add retry with backoff as a baseline mitigation.','If it correlates with volume, treat it as a rate-limit issue.']]
 ];
+// ---- EDIT THESE TWO LINES with real addresses whenever you're ready ----
+// Leave as '' to just pick the recipient yourself each time in Outlook.
+const VENDOR_EMAIL = '';   // e.g. 'support@lintune.com'
+const INTERNAL_EMAIL = ''; // e.g. 'ops-team@yourcompany.com'
+// --------------------------------------------------------------------
 const SYS={NS:'NetSuite',PC:'Procore',LT:'Lintune / Mapping',HTTP:'HTTP / Network',GEN:'General'};
 let sys='ALL';
 const $=id=>document.getElementById(id);
@@ -301,10 +308,27 @@ function render(){
     return `<details${q&&n===0?' open':''}><summary><span class="tag">${r[0]}</span>${esc(r[1])}</summary><div class="bd">
     <b>Cause</b>${esc(r[3])}<b>Step-by-step fix</b><ol class="steps">${r[4].map(s=>`<li>${esc(s)}</li>`).join('')}</ol>
     <b>Matches</b><span class="k">${esc(r[2].split('|').join(' · '))}</span><br>
-    <button class="cp" data-i="${x.i}">Copy</button></div></details>`}).join(''):'<div class="empty">No match. Try a shorter term, the HTTP status, or the error code only.</div>';
+    <button class="cp" data-i="${x.i}" data-a="copy">Copy</button><button class="cp vendor" data-i="${x.i}" data-a="vendor">✉ Email Vendor</button><button class="cp internal" data-i="${x.i}" data-a="internal">✉ Email Internal</button></div></details>`}).join(''):'<div class="empty">No match. Try a shorter term, the HTTP status, or the error code only.</div>';
 }
-$('list').onclick=async e=>{const i=e.target.dataset.i;if(i===undefined)return;const r=D[i];
+$('list').onclick=async e=>{const i=e.target.dataset.i;if(i===undefined)return;const r=D[i];const a=e.target.dataset.a;
   const t=`[${SYS[r[0]]}] ${r[1]}\nCause: ${r[3]}\nFix:\n`+r[4].map((s,n)=>`${n+1}. ${s}`).join('\n');
-  try{await navigator.clipboard.writeText(t);e.target.textContent='Copied ✓'}catch(_){e.target.textContent='Copy blocked'}};
-render();
+  if(a==='copy'){
+    try{await navigator.clipboard.writeText(t);e.target.textContent='Copied ✓'}catch(_){e.target.textContent='Copy blocked'}
+  }else if(a==='vendor'||a==='internal'){
+    const to=a==='vendor'?VENDOR_EMAIL:INTERNAL_EMAIL;
+    const subject=`[${SYS[r[0]]}] ${r[1]}`;
+    const body=(linkedErr?`Original error:\n${linkedErr}\n\n`:'')+`Cause: ${r[3]}\n\nFix steps:\n`+r[4].map((s,n)=>`${n+1}. ${s}`).join('\n');
+    window.location.href=`mailto:${to}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
+  }};
+// ---- Open from a link: page.html#e=<url-encoded error text> ----
+// Text after the # stays in the browser and is never sent to the server.
+let linkedErr='';
+function loadFromHash(){
+  const m=location.hash.match(/^#e=(.*)$/s);
+  if(!m)return;
+  try{linkedErr=decodeURIComponent(m[1].replace(/\+/g,' '))}catch(_){linkedErr=m[1]}
+  $('q').value=linkedErr;render();
+}
+window.addEventListener('hashchange',loadFromHash);
+render();loadFromHash();
 </script></body></html>
